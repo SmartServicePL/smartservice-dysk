@@ -1,0 +1,9 @@
+{
+  "config": {
+    "step": {
+      "user": {"title": "Smart Service — Dysk Google", "description": "Wpis zakłada Smart Service HA.", "data": {"klucz": "Klucz Dysku z panelu Smart Service"}},
+      "reconfigure": {"title": "Smart Service — Dysk Google", "description": "Nowy klucz Dysku zapisuje Smart Service HA.", "data": {"klucz": "Klucz Dysku z panelu Smart Service"}}
+    },
+    "abort": {"already_configured": "Dysk Google przez Smart Service jest już ustawiony.", "reconfigure_successful": "Zapisano nowy klucz."}
+  }
+}
