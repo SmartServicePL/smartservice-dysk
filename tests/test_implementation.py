@@ -25,18 +25,29 @@ TOKENS = {"access_token": "dostep-1", "refresh_token": "odswiez-1", "expires_in"
 
 
 class FakeHass:
-    def __init__(self, entries: list[Any]) -> None:
+    """Home Assistant's flow manager as the implementation sees it: the external data given (external step done),
+    then the next step run (create_entry, or the refusal's abort)."""
+
+    def __init__(self, entries: list[Any], drive: list[Any] | None = None, end: dict | None = None) -> None:
         self.data: dict[str, Any] = {}
-        self.configured: list[tuple[str, dict]] = []
+        self.configured: list[tuple[str, dict | None]] = []
         self.tasks: list[asyncio.Task] = []
         hass = self
 
         class Flow:
-            async def async_configure(self, *, flow_id: str, user_input: dict) -> None:
+            async def async_configure(self, *, flow_id: str, user_input: dict | None = None) -> dict:
                 hass.configured.append((flow_id, user_input))
+                if user_input is not None:
+                    return {"type": "external_done", "flow_id": flow_id}
+                rejected = any(given and "error" in given for _, given in hass.configured)
+                if rejected:
+                    return {"type": "abort", "reason": "user_rejected_authorize"}
+                return end or {"type": "create_entry"}
 
-        self.config_entries = SimpleNamespace(async_entries=lambda domain: entries if domain == dysk.DOMAIN else [],
-                                              flow=Flow())
+        self.config_entries = SimpleNamespace(
+            async_entries=lambda domain: {dysk.DOMAIN: entries, "google_drive": drive or []}.get(domain, []),
+            flow=Flow(),
+        )
 
     def async_create_background_task(self, coro: Awaitable[Any], name: str) -> None:
         self.tasks.append(asyncio.ensure_future(coro))
@@ -82,11 +93,13 @@ def _session(request: web.Request) -> web.Response:
     return web.json_response({"adres": address, "odbior": "odb-1", "wazna_s": 600})
 
 
-def test_sign_in_passes_the_tokens_once_to_the_flow(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_sign_in_passes_the_tokens_once_and_ends_the_flow_itself(monkeypatch: pytest.MonkeyPatch) -> None:
     answers = iter([{"stan": "czeka"}, {"stan": "gotowe", "tokeny": TOKENS}])
+    sessions: list[str] = []
 
     async def sesja(request: web.Request) -> web.Response:
         assert request.headers["Authorization"] == "Bearer klucz-dysku"
+        sessions.append("x")
         return _session(request)
 
     async def wynik(request: web.Request) -> web.Response:
@@ -97,13 +110,22 @@ def test_sign_in_passes_the_tokens_once_to_the_flow(monkeypatch: pytest.MonkeyPa
         hass = FakeHass([])
         impl = dysk.SmartServiceDyskImplementation(hass, "klucz-dysku", base=base)
         url = await impl.async_generate_authorize_url("flow-1")
+        # Home Assistant shows the external step again (a read of the flow): the same address, no new session.
+        assert await impl.async_generate_authorize_url("flow-1") == url
+        assert dysk._flows(hass)["flow-1"]["stan"] == "czeka"
         await asyncio.gather(*hass.tasks)
-        return url, hass.configured, await impl.async_resolve_external_data(hass.configured[0][1])
+        given = hass.configured[0][1]
+        assert given is not None
+        return url, hass.configured, await impl.async_resolve_external_data(given), dysk._flows(hass)
 
-    url, configured, resolved = with_panel({"/oauth/dysk/sesja": sesja, "/oauth/dysk/wynik": wynik}, test, monkeypatch)
+    routes = {"/oauth/dysk/sesja": sesja, "/oauth/dysk/wynik": wynik}
+    url, configured, resolved, flows = with_panel(routes, test, monkeypatch)
     assert url.endswith("/oauth/dysk/start?s=abc")
-    assert configured == [("flow-1", TOKENS)]
+    assert sessions == ["x"]
+    # The tokens once, then the step after the external one - the flow ends here, nothing waits for a browser.
+    assert configured == [("flow-1", TOKENS), ("flow-1", None)]
     assert resolved == TOKENS
+    assert flows["flow-1"]["stan"] == "gotowe" and "adres" not in flows["flow-1"]
 
 
 def test_a_refusal_ends_the_flow_as_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -117,11 +139,78 @@ def test_a_refusal_ends_the_flow_as_rejected(monkeypatch: pytest.MonkeyPatch) ->
         hass = FakeHass([])
         await dysk.SmartServiceDyskImplementation(hass, "k", base=base).async_generate_authorize_url("flow-2")
         await asyncio.gather(*hass.tasks)
-        return hass.configured
+        return hass.configured, dysk._flows(hass)
 
-    assert with_panel({"/oauth/dysk/sesja": sesja, "/oauth/dysk/wynik": wynik}, test, monkeypatch) == [
-        ("flow-2", {"error": "odmowa"})
+    configured, flows = with_panel({"/oauth/dysk/sesja": sesja, "/oauth/dysk/wynik": wynik}, test, monkeypatch)
+    assert configured == [("flow-2", {"error": "odmowa"}), ("flow-2", None)]
+    assert flows["flow-2"]["stan"] == "odmowa"
+
+
+def test_a_flow_ending_without_an_entry_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def sesja(request: web.Request) -> web.Response:
+        return _session(request)
+
+    async def wynik(_request: web.Request) -> web.Response:
+        return web.json_response({"stan": "gotowe", "tokeny": TOKENS})
+
+    async def test(base: str, _s: ClientSession) -> Any:
+        hass = FakeHass([], end={"type": "abort", "reason": "already_configured"})
+        await dysk.SmartServiceDyskImplementation(hass, "k", base=base).async_generate_authorize_url("flow-3")
+        await asyncio.gather(*hass.tasks)
+        return dysk._flows(hass)
+
+    flows = with_panel({"/oauth/dysk/sesja": sesja, "/oauth/dysk/wynik": wynik}, test, monkeypatch)
+    assert flows["flow-3"]["stan"] == "blad"
+
+
+def test_ours_lists_only_the_drive_entries_signed_in_through_smart_service() -> None:
+    drive = [
+        SimpleNamespace(entry_id="E1", unique_id="konto-1", data={"auth_implementation": "smartservice_dysk"}),
+        SimpleNamespace(entry_id="E2", unique_id="konto-2", data={"auth_implementation": "google_drive"}),
     ]
+    assert dysk._ours(FakeHass([], drive)) == [{"entry_id": "E1", "unique_id": "konto-1"}]
+
+
+class Connection:
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, Any]] = []
+
+    def send_result(self, msg_id: int, result: Any) -> None:
+        self.sent.append(("result", result))
+
+    def send_error(self, msg_id: int, code: str, message: str) -> None:
+        self.sent.append(("error", code))
+
+
+def test_revoke_failing_at_google_is_an_error_not_a_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    entry = SimpleNamespace(entry_id="E1", domain="google_drive",
+                            data={"auth_implementation": "smartservice_dysk", "token": {"refresh_token": "odswiez-1"}})
+    status = {"code": 503}
+
+    async def revoke(request: web.Request) -> web.Response:
+        return web.json_response({}, status=status["code"])
+
+    async def test(base: str, _s: ClientSession) -> Any:
+        monkeypatch.setattr(dysk, "REVOKE_URL", f"{base}/revoke")
+        hass = FakeHass([])
+        hass.config_entries.async_get_entry = lambda entry_id: entry if entry_id == "E1" else None
+        handler = dysk.ws_revoke
+        while hasattr(handler, "__wrapped__"):  # the command itself, without Home Assistant's decorators
+            handler = handler.__wrapped__
+        sent = []
+        for code in (503, 200, 400):
+            status["code"] = code
+            connection = Connection()
+            await handler(hass, connection, {"id": 1, "entry_id": "E1"})
+            sent.append(connection.sent[0])
+        connection = Connection()
+        await handler(hass, connection, {"id": 1, "entry_id": "E9"})
+        sent.append(connection.sent[0])
+        return sent
+
+    sent = with_panel({"/revoke": revoke}, test, monkeypatch)
+    assert sent == [("error", "revoke_failed"), ("result", {"uniewazniono": True}), ("result", {"uniewazniono": True}),
+                    ("error", "not_ours")]
 
 
 def test_refresh_through_the_panel_and_its_errors(monkeypatch: pytest.MonkeyPatch) -> None:

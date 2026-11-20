@@ -22,6 +22,7 @@ from homeassistant.components import websocket_api
 from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import (
+    HomeAssistantError,
     OAuth2TokenRequestConnectionError,
     OAuth2TokenRequestReauthError,
 )
@@ -30,7 +31,17 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.typing import ConfigType
 
-from .const import CONF_KEY, DATA_STATE, DOMAIN, IMPLEMENTATION_NAME, RESULT_WAIT_S, REVOKE_URL, SERVICE_DOMAIN
+from .const import (
+    CONF_KEY,
+    DATA_FLOWS,
+    DATA_STATE,
+    DOMAIN,
+    FLOW_KEEP_S,
+    IMPLEMENTATION_NAME,
+    RESULT_WAIT_S,
+    REVOKE_URL,
+    SERVICE_DOMAIN,
+)
 from .panel import (
     P4,
     PANEL,
@@ -51,6 +62,26 @@ def _state(hass: HomeAssistant) -> dict[str, Any]:
     """What Smart Service HA reads: the key not known any more, the account switched off."""
 
     return hass.data.setdefault(DATA_STATE, {"klucz_niewazny": False, "konto_wylaczone": False})
+
+
+def _flows(hass: HomeAssistant) -> dict[str, dict[str, Any]]:
+    """The sign-ins of this integration: flow id -> {stan, adres, czas}; old ones dropped."""
+
+    flows: dict[str, dict[str, Any]] = hass.data.setdefault(DATA_FLOWS, {})
+    now = time.monotonic()
+    for flow_id in [key for key, value in flows.items() if now - value["czas"] > FLOW_KEEP_S]:
+        flows.pop(flow_id, None)
+    return flows
+
+
+def _ours(hass: HomeAssistant) -> list[dict[str, str]]:
+    """The Google Drive entries signed in through „Smart Service” (their ids only - never a token)."""
+
+    return [
+        {"entry_id": entry.entry_id, "unique_id": str(entry.unique_id or "")}
+        for entry in hass.config_entries.async_entries(SERVICE_DOMAIN)
+        if entry.data.get("auth_implementation") == DOMAIN
+    ]
 
 
 def _entry(hass: HomeAssistant) -> ConfigEntry | None:
@@ -89,13 +120,41 @@ class SmartServiceDyskImplementation(config_entry_oauth2_flow.AbstractOAuth2Impl
             state["konto_wylaczone"] = True
 
     async def async_generate_authorize_url(self, flow_id: str) -> str:
-        """A new panel session; its address (the panel sends it on to Google) goes to the owner's browser only."""
+        """A panel session for the flow; its address (the panel sends it on to Google) goes to the owner's browser
+        only. The same flow asked again (Home Assistant shows its external step anew) gets the same address - never
+        a second session."""
 
+        flows = _flows(self.hass)
+        known = flows.get(flow_id)
+        if known and known["stan"] == "czeka" and known.get("adres"):
+            return str(known["adres"])
         try:
             session = await self._panel().start()
         except PanelError as err:
             self._mark(err)
             raise config_entry_oauth2_flow.ImplementationUnavailableError(str(err)) from err
+        flows[flow_id] = {"stan": "czeka", "adres": session.address, "czas": time.monotonic()}
+
+        def done(state: str) -> None:
+            flows[flow_id] = {"stan": state, "czas": time.monotonic()}
+
+        async def finish(user_input: dict[str, Any]) -> str:
+            """The tokens (or the refusal) given, then the flow taken to its end here (its step after the external
+            one) - nothing waits for a browser to read it. The state is what the flow ended with."""
+
+            flow = self.hass.config_entries.flow
+            try:
+                await flow.async_configure(flow_id=flow_id, user_input=user_input)
+                result = await flow.async_configure(flow_id=flow_id)
+            except HomeAssistantError:  # the flow gone (UnknownFlow) or refused: never connected
+                _LOGGER.info("Dysk Google: przepływ zakończył się bez połączenia")
+                return "blad"
+            if "error" in user_input:
+                return "odmowa"
+            kind = result.get("type")
+            if kind == "create_entry" or (kind == "abort" and result.get("reason") == "reauth_successful"):
+                return "gotowe"
+            return "blad"
 
         async def await_tokens() -> None:
             deadline = time.monotonic() + min(session.valid_s, RESULT_WAIT_S)
@@ -109,16 +168,18 @@ class SmartServiceDyskImplementation(config_entry_oauth2_flow.AbstractOAuth2Impl
                 except (SessionExpired, PanelError) as err:
                     self._mark(err)
                     _LOGGER.info("Dysk Google: połączenie nie zostało dokończone (%s)", err)
+                    done("blad")
                     return
                 if result.state == "czeka":
                     continue
                 if result.state == "gotowe" and result.tokens:
-                    await self.hass.config_entries.flow.async_configure(flow_id=flow_id, user_input=result.tokens)
+                    done(await finish(result.tokens))
                     return
                 # The owner said no on Google's page, or the panel could not finish: the flow ends as rejected.
-                await self.hass.config_entries.flow.async_configure(flow_id=flow_id, user_input={"error": result.state})
+                done(await finish({"error": result.state}))
                 return
             _LOGGER.info("Dysk Google: czas na zgodę minął")
+            done("blad")
 
         self.hass.async_create_background_task(await_tokens(), name="smartservice_dysk: czekam na zgodę Google")
         return session.address
@@ -195,7 +256,10 @@ def _reattach(hass: HomeAssistant) -> None:
 def ws_state(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
     """For Smart Service HA: whether the key needs renewing or the account is off (never a key or a token)."""
 
-    connection.send_result(msg["id"], {"wpis": _entry(hass) is not None, **_state(hass)})
+    flows = {flow_id: value["stan"] for flow_id, value in _flows(hass).items()}
+    connection.send_result(
+        msg["id"], {"wpis": _entry(hass) is not None, **_state(hass), "przeplywy": flows, "nasze": _ours(hass)}
+    )
 
 
 @websocket_api.require_admin
@@ -221,4 +285,8 @@ async def ws_revoke(hass: HomeAssistant, connection: websocket_api.ActiveConnect
             done = response.status in (200, 400)  # 400: Google no longer knows the token - already revoked.
     except (TimeoutError, aiohttp.ClientError):
         done = False
-    connection.send_result(msg["id"], {"uniewazniono": done})
+    if not done:
+        # Not revoked: Smart Service HA stops before removing the entry (the token would stay valid at Google).
+        connection.send_error(msg["id"], "revoke_failed", "Google nie potwierdził unieważnienia.")
+        return
+    connection.send_result(msg["id"], {"uniewazniono": True})
