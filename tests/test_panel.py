@@ -1,4 +1,4 @@
-"""The panel client against a local stand-in of the panel's /oauth/dysk* contract (no Google, no network)."""
+"""The panel client against a stand-in of the panel's /oauth/dysk* contract (no Google, no network, no socket)."""
 
 from __future__ import annotations
 
@@ -9,8 +9,9 @@ from pathlib import Path
 import sys
 from typing import Any
 
-from aiohttp import ClientSession, web
+from aiohttp import web
 import pytest
+from stand_in import BASE, StandIn
 
 _PATH = Path(__file__).resolve().parents[1] / "custom_components" / "smartservice_dysk" / "panel.py"
 _SPEC = importlib.util.spec_from_file_location("smartservice_dysk_panel", _PATH)
@@ -23,31 +24,19 @@ TOKENS = {"access_token": "dostep-1", "refresh_token": "odswiez-1", "expires_in"
           "scope": "https://www.googleapis.com/auth/drive.file"}
 
 
-Handler = Callable[[web.Request], Awaitable[web.StreamResponse]]
+Handler = Callable[[Any], Awaitable[web.StreamResponse]]
+PATHS = ("/oauth/dysk/klucz", "/oauth/dysk/sesja", "/oauth/dysk/wynik", "/oauth/dysk/odswiez")
 
 
-def run(handler: Handler, test: Callable[[str, ClientSession], Awaitable[Any]]) -> Any:
-    async def main() -> Any:
-        app = web.Application()
-        app.router.add_route("POST", "/{tail:.*}", handler)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, "127.0.0.1", 0)
-        await site.start()
-        port = site._server.sockets[0].getsockname()[1]  # type: ignore[union-attr]
-        try:
-            async with ClientSession() as session:
-                return await test(f"http://127.0.0.1:{port}", session)
-        finally:
-            await runner.cleanup()
-
-    return asyncio.run(main())
+def run(handler: Handler, test: Callable[[str, Any], Awaitable[Any]]) -> Any:
+    # Every path of the contract answered by the one handler (it records what it saw).
+    return asyncio.run(test(BASE, StandIn(dict.fromkeys(PATHS, handler))))
 
 
 def answer(status: int, body: object, headers: dict[str, str] | None = None) -> Handler:
     seen: list[tuple[str, str, Any]] = []
 
-    async def handler(request: web.Request) -> web.Response:
+    async def handler(request: Any) -> web.Response:
         seen.append((request.path, request.headers.get("Authorization", ""), await request.json()))
         return web.json_response(body, status=status, headers=headers)
 
@@ -63,14 +52,14 @@ def test_p0_key_with_the_installation_code() -> None:
 
 
 def test_p1_session_only_to_the_panels_own_start_address() -> None:
-    def start(base: str) -> Callable[[web.Request], Awaitable[web.Response]]:
+    def start(base: str) -> Callable[[Any], Awaitable[web.StreamResponse]]:
         return answer(200, {"adres": f"{base}/oauth/dysk/start?s=abc", "odbior": "odb-1", "wazna_s": 600})
 
-    async def test(base: str, s: ClientSession) -> Any:
+    async def test(base: str, s: Any) -> Any:
         return await panel.PanelDysk(s, "klucz", base=base).start()
 
-    # The stand-in does not know its port before it runs: build the answer from the request.
-    async def handler(request: web.Request) -> web.Response:
+    # The answer built from the request: the panel's own address.
+    async def handler(request: Any) -> web.StreamResponse:
         base = f"http://{request.host}"
         return await start(base)(request)
 
@@ -83,7 +72,7 @@ def test_p1_session_only_to_the_panels_own_start_address() -> None:
 
 
 def test_p3_states_and_tokens_once() -> None:
-    async def collect(base: str, s: ClientSession) -> Any:
+    async def collect(base: str, s: Any) -> Any:
         return await panel.PanelDysk(s, "klucz", base=base).result("odb-1")
 
     assert run(answer(200, {"stan": "czeka"}), collect).state == "czeka"
@@ -100,7 +89,7 @@ def test_p3_states_and_tokens_once() -> None:
 
 
 def test_p4_refresh_and_its_errors() -> None:
-    async def refresh(base: str, s: ClientSession) -> Any:
+    async def refresh(base: str, s: Any) -> Any:
         return await panel.PanelDysk(s, "klucz", base=base).refresh("odswiez-1")
 
     fresh = {k: v for k, v in TOKENS.items() if k != "refresh_token"}
@@ -122,8 +111,7 @@ def test_p4_refresh_and_its_errors() -> None:
 
 def test_no_connection_is_unavailable_and_errors_carry_no_secret() -> None:
     async def test() -> None:
-        async with ClientSession() as s:
-            await panel.PanelDysk(s, "tajny-klucz", base="http://127.0.0.1:9").refresh("tajny-token")
+        await panel.PanelDysk(StandIn(offline=True), "tajny-klucz", base=BASE).refresh("tajny-token")  # type: ignore[arg-type]
 
     with pytest.raises(panel.PanelUnavailable) as err:
         asyncio.run(test())

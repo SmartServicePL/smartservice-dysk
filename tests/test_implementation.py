@@ -1,7 +1,7 @@
 """The OAuth implementation „Smart Service” for google_drive against a local stand-in of the panel.
 
 Home Assistant itself cannot run on this computer (it needs Linux), so `hass` is a small stand-in with only what the
-implementation touches; the panel is a real local aiohttp server speaking the /oauth/dysk* contract.
+implementation touches; the panel is a stand-in speaking the /oauth/dysk* contract (no network, no socket).
 """
 
 from __future__ import annotations
@@ -11,8 +11,9 @@ from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
 from typing import Any
 
-from aiohttp import ClientSession, web
+from aiohttp import web
 import pytest
+from stand_in import BASE, StandIn
 
 from homeassistant.exceptions import OAuth2TokenRequestConnectionError, OAuth2TokenRequestReauthError
 from homeassistant.helpers import config_entry_oauth2_flow
@@ -52,25 +53,11 @@ class FakeHass:
         self.tasks.append(asyncio.ensure_future(coro))
 
 
-def with_panel(routes: dict[str, Callable[[web.Request], Awaitable[web.Response]]],
-               test: Callable[[str, ClientSession], Awaitable[Any]], monkeypatch: pytest.MonkeyPatch) -> Any:
-    async def main() -> Any:
-        app = web.Application()
-        for path, handler in routes.items():
-            app.router.add_post(path, handler)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, "127.0.0.1", 0)
-        await site.start()
-        port = site._server.sockets[0].getsockname()[1]  # type: ignore[union-attr]
-        try:
-            async with ClientSession() as session:
-                monkeypatch.setattr(dysk, "async_get_clientsession", lambda hass: session)
-                return await test(f"http://127.0.0.1:{port}", session)
-        finally:
-            await runner.cleanup()
-
-    return asyncio.run(main())
+def with_panel(routes: dict[str, Callable[[Any], Awaitable[web.StreamResponse]]],
+               test: Callable[[str, Any], Awaitable[Any]], monkeypatch: pytest.MonkeyPatch) -> Any:
+    session = StandIn(routes)
+    monkeypatch.setattr(dysk, "async_get_clientsession", lambda hass: session)
+    return asyncio.run(test(BASE, session))
 
 
 def test_provider_only_for_google_drive_and_only_with_our_entry() -> None:
@@ -87,7 +74,7 @@ def test_provider_only_for_google_drive_and_only_with_our_entry() -> None:
         asyncio.run(dysk._provide(hass, "google_drive"))
 
 
-def _session(request: web.Request) -> web.Response:
+def _session(request: Any) -> web.Response:
     address = f"http://{request.host}/oauth/dysk/start?s=abc"
     return web.json_response({"adres": address, "odbior": "odb-1", "wazna_s": 600})
 
@@ -96,16 +83,16 @@ def test_sign_in_passes_the_tokens_once_and_ends_the_flow_itself(monkeypatch: py
     answers = iter([{"stan": "czeka"}, {"stan": "gotowe", "tokeny": TOKENS}])
     sessions: list[str] = []
 
-    async def sesja(request: web.Request) -> web.Response:
+    async def sesja(request: Any) -> web.Response:
         assert request.headers["Authorization"] == "Bearer klucz-dysku"
         sessions.append("x")
         return _session(request)
 
-    async def wynik(request: web.Request) -> web.Response:
+    async def wynik(request: Any) -> web.Response:
         assert await request.json() == {"odbior": "odb-1"}
         return web.json_response(next(answers))
 
-    async def test(base: str, _s: ClientSession) -> Any:
+    async def test(base: str, _s: Any) -> Any:
         hass = FakeHass([])
         impl = dysk.SmartServiceDyskImplementation(hass, "klucz-dysku", base=base)
         url = await impl.async_generate_authorize_url("flow-1")
@@ -128,13 +115,13 @@ def test_sign_in_passes_the_tokens_once_and_ends_the_flow_itself(monkeypatch: py
 
 
 def test_a_refusal_ends_the_flow_as_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def sesja(request: web.Request) -> web.Response:
+    async def sesja(request: Any) -> web.Response:
         return _session(request)
 
-    async def wynik(_request: web.Request) -> web.Response:
+    async def wynik(_request: Any) -> web.Response:
         return web.json_response({"stan": "odmowa"})
 
-    async def test(base: str, _s: ClientSession) -> Any:
+    async def test(base: str, _s: Any) -> Any:
         hass = FakeHass([])
         await dysk.SmartServiceDyskImplementation(hass, "k", base=base).async_generate_authorize_url("flow-2")
         await asyncio.gather(*hass.tasks)
@@ -146,13 +133,13 @@ def test_a_refusal_ends_the_flow_as_rejected(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_a_flow_ending_without_an_entry_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def sesja(request: web.Request) -> web.Response:
+    async def sesja(request: Any) -> web.Response:
         return _session(request)
 
-    async def wynik(_request: web.Request) -> web.Response:
+    async def wynik(_request: Any) -> web.Response:
         return web.json_response({"stan": "gotowe", "tokeny": TOKENS})
 
-    async def test(base: str, _s: ClientSession) -> Any:
+    async def test(base: str, _s: Any) -> Any:
         hass = FakeHass([], end={"type": "abort", "reason": "already_configured"})
         await dysk.SmartServiceDyskImplementation(hass, "k", base=base).async_generate_authorize_url("flow-3")
         await asyncio.gather(*hass.tasks)
@@ -186,10 +173,10 @@ def test_revoke_failing_at_google_is_an_error_not_a_result(monkeypatch: pytest.M
                             data={"auth_implementation": "smartservice_dysk", "token": {"refresh_token": "odswiez-1"}})
     status = {"code": 503}
 
-    async def revoke(request: web.Request) -> web.Response:
+    async def revoke(request: Any) -> web.Response:
         return web.json_response({}, status=status["code"])
 
-    async def test(base: str, _s: ClientSession) -> Any:
+    async def test(base: str, _s: Any) -> Any:
         monkeypatch.setattr(dysk, "REVOKE_URL", f"{base}/revoke")
         hass = FakeHass([])
         hass.config_entries.async_get_entry = lambda entry_id: entry if entry_id == "E1" else None
@@ -215,11 +202,11 @@ def test_revoke_failing_at_google_is_an_error_not_a_result(monkeypatch: pytest.M
 def test_refresh_through_the_panel_and_its_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     plan: list[tuple[int, dict]] = []
 
-    async def odswiez(request: web.Request) -> web.Response:
+    async def odswiez(request: Any) -> web.Response:
         status, body = plan.pop(0)
         return web.json_response(body, status=status)
 
-    async def test(base: str, _s: ClientSession) -> Any:
+    async def test(base: str, _s: Any) -> Any:
         hass = FakeHass([])
         impl = dysk.SmartServiceDyskImplementation(hass, "k", base=base)
         fresh = {"access_token": "dostep-2", "expires_in": 3599, "token_type": "Bearer"}

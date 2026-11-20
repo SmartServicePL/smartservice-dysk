@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.1
+
+- Logo Smart Service w Home Assistant i HACS, odnośniki do opisu i zgłoszeń na GitHubie.
+- Testy bez połączeń sieciowych (atrapa panelu w testach).
+
 ## 0.1.0
 
 - Sposób logowania „Smart Service” dla integracji Dysk Google z Home Assistant: logowanie i odnawianie dostępu przez panel Smart Service, sekret klienta Google w panelu, tokeny tylko w domu, zakres `drive.file`.
