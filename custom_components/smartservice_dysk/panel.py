@@ -1,4 +1,3 @@
-# © Smart Service Tczew. Wszelkie prawa zastrzeżone.
 """The Smart Service panel's Dysk Google points (/oauth/dysk*), the client side.
 
 The panel holds the Google client's secret; the home holds the tokens. This module only talks to the panel: it never

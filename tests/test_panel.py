@@ -1,4 +1,3 @@
-# © Smart Service Tczew. Wszelkie prawa zastrzeżone.
 """The panel client against a local stand-in of the panel's /oauth/dysk* contract (no Google, no network)."""
 
 from __future__ import annotations

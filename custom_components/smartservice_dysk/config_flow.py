@@ -1,4 +1,3 @@
-# © Smart Service Tczew. Wszelkie prawa zastrzeżone.
 """The one entry: made and renewed by Smart Service HA with the panel's Dysk key (no screens for the owner)."""
 
 from __future__ import annotations

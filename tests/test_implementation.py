@@ -1,4 +1,3 @@
-# © Smart Service Tczew. Wszelkie prawa zastrzeżone.
 """The OAuth implementation „Smart Service” for google_drive against a local stand-in of the panel.
 
 Home Assistant itself cannot run on this computer (it needs Linux), so `hass` is a small stand-in with only what the

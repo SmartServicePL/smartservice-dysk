@@ -1,4 +1,3 @@
-# © Smart Service Tczew. Wszelkie prawa zastrzeżone.
 """Smart Service Dysk constants."""
 
 DOMAIN = "smartservice_dysk"

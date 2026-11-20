@@ -1,4 +1,3 @@
-# © Smart Service Tczew. Wszelkie prawa zastrzeżone.
 """Smart Service Dysk: the OAuth implementation „Smart Service” for Home Assistant's own Google Drive integration.
 
 Home Assistant's `google_drive` makes the backups; this integration only signs in and refreshes the token through
