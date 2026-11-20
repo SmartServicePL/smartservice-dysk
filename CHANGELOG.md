@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.2
+
+- Okno integracji w Home Assistant bez pola klucza: mówi tylko, że Dysk Google łączysz w Smart Service HA (Pomoc i konto → Kopia zapasowa). Klucz przekazuje sam Smart Service HA.
+
 ## 0.1.1
 
 - Logo Smart Service w Home Assistant i HACS, odnośniki do opisu i zgłoszeń na GitHubie.

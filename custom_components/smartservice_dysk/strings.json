@@ -1,9 +1,19 @@
 {
   "config": {
     "step": {
-      "user": {"title": "Smart Service — Dysk Google", "description": "Wpis zakłada Smart Service HA.", "data": {"klucz": "Klucz Dysku z panelu Smart Service"}},
-      "reconfigure": {"title": "Smart Service — Dysk Google", "description": "Nowy klucz Dysku zapisuje Smart Service HA.", "data": {"klucz": "Klucz Dysku z panelu Smart Service"}}
+      "user": {
+        "title": "Smart Service — Dysk Google",
+        "description": "Dysk Google łączy Smart Service HA. Połączysz go w Pomoc i konto → Kopia zapasowa."
+      },
+      "reconfigure": {
+        "title": "Smart Service — Dysk Google",
+        "description": "Dysk Google łączy Smart Service HA. Połączysz go w Pomoc i konto → Kopia zapasowa."
+      }
     },
-    "abort": {"already_configured": "Dysk Google przez Smart Service jest już ustawiony.", "reconfigure_successful": "Zapisano nowy klucz."}
+    "abort": {
+      "already_configured": "Dysk Google przez Smart Service jest już ustawiony.",
+      "reconfigure_successful": "Zapisano nowy klucz.",
+      "polacz_w_smart_service": "Dysk Google łączy Smart Service HA. Połączysz go w Pomoc i konto → Kopia zapasowa."
+    }
   }
 }
