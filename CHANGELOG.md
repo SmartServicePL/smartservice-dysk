@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.3
+
+- „Połącz ponownie” działa także wtedy, gdy Home Assistant nie poprosił o ponowne logowanie (np. po odebraniu dostępu i ponownym uruchomieniu): ponowne połączenie tego samego wpisu Dysku Google kończy się sukcesem.
+
 ## 0.1.2
 
 - Okno integracji w Home Assistant bez pola klucza: mówi tylko, że Dysk Google łączysz w Smart Service HA (Pomoc i konto → Kopia zapasowa). Klucz przekazuje sam Smart Service HA.

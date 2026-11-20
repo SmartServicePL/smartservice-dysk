@@ -151,7 +151,9 @@ class SmartServiceDyskImplementation(config_entry_oauth2_flow.AbstractOAuth2Impl
             if "error" in user_input:
                 return "odmowa"
             kind = result.get("type")
-            if kind == "create_entry" or (kind == "abort" and result.get("reason") == "reauth_successful"):
+            # A new entry, or the same entry signed in anew (Home Assistant's reauth, or the reconfigure
+            # Smart Service HA starts when there is no reauth).
+            if kind == "create_entry" or (kind == "abort" and result.get("reason") in DONE_REASONS):
                 return "gotowe"
             return "blad"
 
@@ -222,6 +224,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, ws_state)
     websocket_api.async_register_command(hass, ws_revoke)
     return True
+
+
+DONE_REASONS = frozenset({"reauth_successful", "reconfigure_successful"})
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

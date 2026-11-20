@@ -232,3 +232,20 @@ def test_refresh_through_the_panel_and_its_errors(monkeypatch: pytest.MonkeyPatc
         return True
 
     assert with_panel({"/oauth/dysk/odswiez": odswiez}, test, monkeypatch)
+
+
+def test_the_same_entry_signed_in_anew_by_reconfigure_is_done(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def sesja(request: Any) -> web.Response:
+        return _session(request)
+
+    async def wynik(_request: Any) -> web.Response:
+        return web.json_response({"stan": "gotowe", "tokeny": TOKENS})
+
+    async def test(base: str, _s: Any) -> Any:
+        hass = FakeHass([], end={"type": "abort", "reason": "reconfigure_successful"})
+        await dysk.SmartServiceDyskImplementation(hass, "k", base=base).async_generate_authorize_url("flow-4")
+        await asyncio.gather(*hass.tasks)
+        return dysk._flows(hass)
+
+    flows = with_panel({"/oauth/dysk/sesja": sesja, "/oauth/dysk/wynik": wynik}, test, monkeypatch)
+    assert flows["flow-4"]["stan"] == "gotowe"
